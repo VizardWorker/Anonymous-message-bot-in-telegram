@@ -14,7 +14,7 @@
 
 ### 1. Клонирование репозитория
 ```bash
-git clone https://github.com/твой_ник/telegram-bot.git
+git clone https://github.com/EgerKuzmichRus/Anonymous-message-bot-in-telegram.git
 cd telegram-bot
 ```
 
@@ -27,6 +27,7 @@ pip install -r requirements.txt
 Создайте файл `.env` в корне проекта и укажите в нем ваш токен бота:
 ```
 TOKEN=your_telegram_bot_token
+ADMIN_ID
 ```
 
 ### 4. Запуск бота
