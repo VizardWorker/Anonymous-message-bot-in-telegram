@@ -10,14 +10,19 @@ import asyncio
 from uuid import uuid4
 import logging
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+import os
+
+# Загрузка переменных окружения
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Конфигурация
-TOKEN = "YOUR_BOT_TOKEN"  # Замените на ваш токен бота
-ADMIN_ID = "YOUR_TELEGRAM_ID"  # Замените на ваш Telegram ID
+TOKEN = os.getenv("TOKEN")
+ADMIN_ID = os.getenv("ADMIN_ID")
 bot = Bot(token=TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 bot_username = None
