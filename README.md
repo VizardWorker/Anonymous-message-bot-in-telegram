@@ -15,7 +15,7 @@
 ### 1. Клонирование репозитория
 ```bash
 git clone https://github.com/EgerKuzmichRus/Anonymous-message-bot-in-telegram.git
-cd telegram-bot
+cd Anonymous-message-bot-in-telegram
 ```
 
 ### 2. Установка зависимостей
