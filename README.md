@@ -14,7 +14,7 @@
 
 ### 1. Клонирование репозитория
 ```bash
-git clone https://github.com/thisaccounthasbeendel/Anonymous-message-bot-in-telegram.git
+git clone https://github.com/VizardWorker/Anonymous-message-bot-in-telegram.git
 cd Anonymous-message-bot-in-telegram
 ```
 
