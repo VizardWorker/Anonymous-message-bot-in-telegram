@@ -12,13 +12,13 @@ import logging
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import os
+from logger_config import setup_logger
 
 # Загрузка переменных окружения
 load_dotenv()
 
 # Настройка логирования
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger()
 
 # Конфигурация
 TOKEN = os.getenv("TOKEN")
@@ -35,26 +35,30 @@ class UserState(StatesGroup):
 
 # База данных
 def init_db():
-    with sqlite3.connect('bot.db') as conn:
-        c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS users 
-                     (user_id INTEGER PRIMARY KEY, unique_link TEXT UNIQUE)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS messages 
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT, 
-                      link_owner_id INTEGER, 
-                      sender_id INTEGER,
-                      message TEXT, 
-                      is_reported INTEGER DEFAULT 0)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS admins 
-                     (admin_id INTEGER PRIMARY KEY)''')
-        c.execute('''CREATE TABLE IF NOT EXISTS blocked_users 
-                     (user_id INTEGER PRIMARY KEY, ban_until TEXT)''')
-        c.execute("PRAGMA table_info(blocked_users)")
-        columns = [col[1] for col in c.fetchall()]
-        if 'ban_until' not in columns:
-            c.execute("ALTER TABLE blocked_users ADD COLUMN ban_until TEXT")
-            logger.info("Added column 'ban_until' to blocked_users table")
-        c.execute("INSERT OR IGNORE INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
+    try:
+        with sqlite3.connect('bot.db') as conn:
+            c = conn.cursor()
+            c.execute('''CREATE TABLE IF NOT EXISTS users 
+                         (user_id INTEGER PRIMARY KEY, unique_link TEXT UNIQUE)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS messages 
+                         (id INTEGER PRIMARY KEY AUTOINCREMENT, 
+                          link_owner_id INTEGER, 
+                          sender_id INTEGER,
+                          message TEXT, 
+                          is_reported INTEGER DEFAULT 0)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS admins 
+                         (admin_id INTEGER PRIMARY KEY)''')
+            c.execute('''CREATE TABLE IF NOT EXISTS blocked_users 
+                         (user_id INTEGER PRIMARY KEY, ban_until TEXT)''')
+            c.execute("PRAGMA table_info(blocked_users)")
+            columns = [col[1] for col in c.fetchall()]
+            if 'ban_until' not in columns:
+                c.execute("ALTER TABLE blocked_users ADD COLUMN ban_until TEXT")
+                logger.info("Added column 'ban_until' to blocked_users table")
+            c.execute("INSERT OR IGNORE INTO admins (admin_id) VALUES (?)", (ADMIN_ID,))
+    except sqlite3.Error as e:
+        logger.error(f"Database initialization error: {e}")
+        raise
 
 def is_admin(user_id):
     with sqlite3.connect('bot.db') as conn:
@@ -92,6 +96,9 @@ def is_user_blocked(user_id):
         return False
 
 def block_user(user_id, duration_hours):
+    if is_admin(user_id):
+        return False
+    
     ban_until = (datetime.now() + timedelta(hours=duration_hours)).isoformat()
     with sqlite3.connect('bot.db') as conn:
         c = conn.cursor()
@@ -123,16 +130,20 @@ def get_reported_messages():
         return c.fetchall()
 
 def get_or_create_user_link(user_id):
-    with sqlite3.connect('bot.db') as conn:
-        c = conn.cursor()
-        c.execute("SELECT unique_link FROM users WHERE user_id=?", (user_id,))
-        result = c.fetchone()
-        if not result:
-            unique_link = str(uuid4()).replace('-', '')
-            c.execute("INSERT INTO users (user_id, unique_link) VALUES (?, ?)", (user_id, unique_link))
-        else:
-            unique_link = result[0]
-        return unique_link
+    try:
+        with sqlite3.connect('bot.db') as conn:
+            c = conn.cursor()
+            c.execute("SELECT unique_link FROM users WHERE user_id=?", (user_id,))
+            result = c.fetchone()
+            if not result:
+                unique_link = str(uuid4()).replace('-', '')
+                c.execute("INSERT INTO users (user_id, unique_link) VALUES (?, ?)", (user_id, unique_link))
+            else:
+                unique_link = result[0]
+            return unique_link
+    except sqlite3.Error as e:
+        logger.error(f"Database error in get_or_create_user_link: {e}")
+        return None
 
 def get_link_owner(unique_link):
     with sqlite3.connect('bot.db') as conn:
@@ -204,93 +215,157 @@ def get_admin_list_keyboard():
 # Обработчики
 @dp.message(Command("start"))
 async def start_command(message: types.Message, state: FSMContext):
-    global bot_username
-    args = message.text.split()
-    user_id = message.from_user.id
-    if is_user_blocked(user_id):
-        await message.answer("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
-        return
-    if len(args) == 1:
-        unique_link = get_or_create_user_link(user_id)
-        link = f"https://t.me/{bot_username}?start={unique_link}"
-        admin_hint = "<b>Вы админ.</b> Используйте /add_admin для добавления администраторов." if is_admin(user_id) else ""
-        text = (
-            f"<b>👋 Добро пожаловать!</b>\n\n"
-            f"Я помогу вам получать анонимные сообщения.\n\n"
-            f"Ваша уникальная ссылка: <a href='{link}'>{link}</a>\n\n"
-            f"Поделитесь ею с друзьями!\n\n"
-            f"• Получите уникальную ссылку\n"
-            f"• Делитесь ею с друзьями\n"
-            f"• Получайте анонимные сообщения\n"
-            f"• Жалуйтесь на нежелательный контент\n\n"
-            f"{admin_hint}"
-        )
-        await message.answer(text, reply_markup=get_main_menu(is_admin(user_id)), disable_web_page_preview=True)
-    else:
-        unique_link = args[1]
-        owner_id = get_link_owner(unique_link)
-        if owner_id:
-            await message.answer("✍️ Напишите ваше анонимное сообщение:")
-            await state.set_state(UserState.waiting_for_anon_message)
-            await state.update_data(owner_id=owner_id)
+    try:
+        global bot_username
+        args = message.text.split()
+        user_id = message.from_user.id
+        
+        if is_user_blocked(user_id):
+            await message.answer("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+            return
+            
+        if len(args) == 1:
+            try:
+                unique_link = get_or_create_user_link(user_id)
+                if not unique_link:
+                    await message.answer("<b>❌ Ошибка при создании ссылки</b>")
+                    return
+                    
+                link = f"https://t.me/{bot_username}?start={unique_link}"
+                admin_hint = "<b>Вы админ.</b> Используйте /add_admin для добавления администраторов." if is_admin(user_id) else ""
+                text = (
+                    f"<b>👋 Добро пожаловать!</b>\n\n"
+                    f"Я помогу вам получать анонимные сообщения.\n\n"
+                    f"Ваша уникальная ссылка: <a href='{link}'>{link}</a>\n\n"
+                    f"Поделитесь ею с друзьями!\n\n"
+                    f"• Получите уникальную ссылку\n"
+                    f"• Делитесь ею с друзьями\n"
+                    f"• Получайте анонимные сообщения\n"
+                    f"• Жалуйтесь на нежелательный контент\n\n"
+                    f"{admin_hint}"
+                )
+                await message.answer(text, reply_markup=get_main_menu(is_admin(user_id)), 
+                                  disable_web_page_preview=True)
+            except Exception as e:
+                logger.error(f"Ошибка при обработке команды: {e}")
+                await message.answer("<b>❌ Произошла ошибка при обработке команды</b>")
         else:
-            await message.answer("❌ Ссылка недействительна", reply_markup=get_main_menu(is_admin(user_id)))
+            try:
+                unique_link = args[1]
+                owner_id = get_link_owner(unique_link)
+                if owner_id:
+                    await message.answer("✍️ Напишите ваше анонимное сообщение:")
+                    await state.set_state(UserState.waiting_for_anon_message)
+                    await state.update_data(owner_id=owner_id)
+                else:
+                    await message.answer("❌ Ссылка недействительна", 
+                                      reply_markup=get_main_menu(is_admin(user_id)))
+            except Exception as e:
+                logger.error(f"Ошибка при обработке ссылки: {e}")
+                await message.answer("<b>❌ Ошибка при обработке ссылки</b>")
+                await state.clear()
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при выполнении команды: {e}")
+        await message.answer("<b>❌ Произошла непредвиденная ошибка</b>")
+        await state.clear()
 
 @dp.message(UserState.waiting_for_anon_message)
 async def process_message(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    if is_user_blocked(user_id):
-        await message.answer("<b>🚫 Вы заблокированы</b> и не можете отправлять сообщения!")
+    try:
+        user_id = message.from_user.id
+        if is_user_blocked(user_id):
+            await message.answer("<b>🚫 Вы заблокированы</b> и не можете отправлять сообщения!")
+            await state.clear()
+            return
+        data = await state.get_data()
+        owner_id = data.get("owner_id")
+        
+        try:
+            with sqlite3.connect('bot.db') as conn:
+                c = conn.cursor()
+                c.execute("INSERT INTO messages (link_owner_id, sender_id, message) VALUES (?, ?, ?)",
+                          (owner_id, user_id, message.text))
+                msg_id = c.lastrowid
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка базы данных при  сохранении сообщения: {e}")
+            await message.answer("<b>❌ Произошла ошибка при сохранении сообщения</b>")
+            return
+
+        try:
+            await bot.send_message(owner_id, f"<b>✨ Новое анонимное сообщение:</b>\n{message.text}", 
+                                 reply_markup=get_report_button(msg_id))
+        except TelegramBadRequest as e:
+            logger.error(f"Не удалось отправить сообщение получателю {owner_id}: {e}")
+            # Можно удалить сообщение из БД, так как оно не было доставлено
+            with sqlite3.connect('bot.db') as conn:
+                c = conn.cursor()
+                c.execute("DELETE FROM messages WHERE id=?", (msg_id,))
+            await message.answer("<b>❌ Не удалось отправить сообщение получателю</b>")
+            return
+
+        await message.answer("<b>✅ Сообщение отправлено!</b>", reply_markup=get_main_menu(is_admin(user_id)))
         await state.clear()
-        return
-    data = await state.get_data()
-    owner_id = data.get("owner_id")
-    with sqlite3.connect('bot.db') as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO messages (link_owner_id, sender_id, message) VALUES (?, ?, ?)",
-                  (owner_id, user_id, message.text))
-        msg_id = c.lastrowid
-    await bot.send_message(owner_id, f"<b>✨ Новое анонимное сообщение:</b>\n{message.text}", 
-                          reply_markup=get_report_button(msg_id))
-    await message.answer("<b>✅ Сообщение отправлено!</b>", reply_markup=get_main_menu(is_admin(user_id)))
-    await state.clear()
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка в process_message: {e}")
+        await message.answer("<b>❌ Произошла непредвиденная ошибка</b>")
+        await state.clear()
 
 @dp.callback_query(lambda c: c.data == "get_link")
 async def get_link(call: types.CallbackQuery):
     user_id = call.from_user.id
     if is_user_blocked(user_id):
         await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
         return
     unique_link = get_or_create_user_link(user_id)
     link = f"https://t.me/{bot_username}?start={unique_link}"
     text = f"📎 Ваша ссылка:\n<a href='{link}'>{link}</a>"
-    await call.message.edit_text(text, reply_markup=get_main_menu(is_admin(user_id)), disable_web_page_preview=True)
+    await call.message.answer(text, reply_markup=get_main_menu(is_admin(user_id)), disable_web_page_preview=True)
     await call.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("report_"))
 async def process_report(call: types.CallbackQuery):
-    msg_id = int(call.data.split("_")[1])
-    with sqlite3.connect('bot.db') as conn:
-        c = conn.cursor()
-        c.execute("SELECT link_owner_id, sender_id, message FROM messages WHERE id=?", (msg_id,))
-        result = c.fetchone()
-        c.execute("UPDATE messages SET is_reported=1 WHERE id=?", (msg_id,))
-    if result:
-        owner_id, sender_id, reported_message = result
-        notification_text = (
-            f"<b>🚨 Новая жалоба!</b>\n"
-            f"Владелец ссылки: {owner_id}\n"
-            f"Отправитель: {sender_id}\n"
-            f"Сообщение: {reported_message}"
-        )
-        for admin_id in get_admins():
-            try:
-                await bot.send_message(admin_id, notification_text, reply_markup=get_ban_duration_panel(sender_id, msg_id))
-                logger.info(f"Notified admin {admin_id} about report on message {msg_id}")
-            except TelegramBadRequest as e:
-                logger.error(f"Failed to notify admin {admin_id}: {e}")
-    await call.message.edit_text("<b>✅ Жалоба отправлена!</b>", reply_markup=get_main_menu(is_admin(call.from_user.id)))
-    await call.answer()
+    try:
+        msg_id = int(call.data.split("_")[1])
+        try:
+            with sqlite3.connect('bot.db') as conn:
+                c = conn.cursor()
+                c.execute("SELECT link_owner_id, sender_id, message FROM messages WHERE id=?", (msg_id,))
+                result = c.fetchone()
+                c.execute("UPDATE messages SET is_reported=1 WHERE id=?", (msg_id,))
+        except sqlite3.Error as e:
+            logger.error(f"Ошибка базы данных при обработке жалобы на сообщение {msg_id}):  {e}")
+            await call.answer("❌ Ошибка при обработке жалобы", show_alert=True)
+            return
+
+        if result:
+            owner_id, sender_id, reported_message = result
+            notification_text = (
+                f"<b>🚨 Новая жалоба!</b>\n"
+                f"Владелец ссылки: {owner_id}\n"
+                f"Отправитель: {sender_id}\n"
+                f"Сообщение: {reported_message}"
+            )
+            
+            notification_sent = False
+            for admin_id in get_admins():
+                try:
+                    await bot.send_message(admin_id, notification_text, 
+                                         reply_markup=get_ban_duration_panel(sender_id, msg_id))
+                    notification_sent = True
+                except TelegramBadRequest as e:
+                    logger.error(f"Ошибка от правления жалобы администратору {admin_id} на сообщение {msg_id}: {e}")
+                    
+            if not notification_sent:
+                await call.answer("❌ Не удалось уведомить администраторов", show_alert=True)
+                return
+
+        await call.message.edit_text("<b>✅ Жалоба отправлена!</b>", 
+                                   reply_markup=get_main_menu(is_admin(call.from_user.id)))
+        await call.answer()
+    except Exception as e:
+        logger.error(f"Неизвестная ошибка при отправлении жалобы: {e}")
+        await call.answer("❌ Произошла ошибка", show_alert=True)
 
 @dp.callback_query(lambda c: c.data.startswith("ban_"))
 async def handle_ban(call: types.CallbackQuery):
@@ -299,6 +374,12 @@ async def handle_ban(call: types.CallbackQuery):
         return
     parts = call.data.split("_")
     user_id, msg_id, duration = int(parts[1]), int(parts[2]), int(parts[3])
+    
+    # Проверяем, не является ли пользователь администратором
+    if is_admin(user_id):
+        await call.answer("❌ Нельзя заблокировать администратора!", show_alert=True)
+        return
+        
     duration_hours = duration if duration > 0 else 999999
     ban_until = datetime.now() + timedelta(hours=duration_hours)
     block_user(user_id, duration_hours)
@@ -335,7 +416,12 @@ async def ignore_report(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "admin_panel")
 async def admin_panel(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
     text = "<b>👨‍💼 Админ-панель:</b>"
@@ -344,7 +430,12 @@ async def admin_panel(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "list_blocked")
 async def list_blocked(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
     blocked = get_blocked_users()
@@ -367,7 +458,12 @@ async def list_blocked(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "list_reports")
 async def list_reports(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
     reports = get_reported_messages()
@@ -388,7 +484,12 @@ async def list_reports(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("manage_report_"))
 async def manage_report(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
     parts = call.data.split("_")
@@ -412,22 +513,27 @@ async def manage_report(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data.startswith("manage_") and c.data.split("_")[1].isdigit())
 async def manage_blocked(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
-    user_id = int(call.data.split("_")[1])
+    blocked_user_id = int(call.data.split("_")[1])
     with sqlite3.connect('bot.db') as conn:
         c = conn.cursor()
-        c.execute("SELECT ban_until FROM blocked_users WHERE user_id=?", (user_id,))
+        c.execute("SELECT ban_until FROM blocked_users WHERE user_id=?", (blocked_user_id,))
         result = c.fetchone()
     if result:
         ban_until = datetime.fromisoformat(result[0])
         remaining = ban_until - datetime.now()
         remaining_text = f"до {ban_until.strftime('%Y-%m-%d %H:%M')}" if remaining.total_seconds() > 0 else "навсегда"
-        text = f"<b>👤 Пользователь {user_id}</b>\nСрок бана: {remaining_text}"
+        text = f"<b>👤 Пользователь {blocked_user_id}</b>\nСрок бана: {remaining_text}"
     else:
-        text = f"<b>👤 Пользователь {user_id}</b> не найден в списке заблокированных"
-    await call.message.edit_text(text, reply_markup=get_blocked_user_panel(user_id))
+        text = f"<b>👤 Пользователь {blocked_user_id}</b> не найден в списке заблокированных"
+    await call.message.edit_text(text, reply_markup=get_blocked_user_panel(blocked_user_id))
     await call.answer()
 
 @dp.callback_query(lambda c: c.data.startswith("edit_ban_") and len(c.data.split("_")) == 3)
@@ -447,6 +553,9 @@ async def handle_edit_ban_duration(call: types.CallbackQuery):
         return
     parts = call.data.split("_")
     user_id, duration = int(parts[3]), int(parts[4])
+
+    
+
     duration_hours = duration if duration > 0 else 999999
     ban_until = datetime.now() + timedelta(hours=duration_hours)
     
@@ -499,7 +608,12 @@ async def unblock(call: types.CallbackQuery):
 
 @dp.callback_query(lambda c: c.data == "manage_admins")
 async def manage_admins(call: types.CallbackQuery):
-    if not is_admin(call.from_user.id):
+    user_id = call.from_user.id
+    if is_user_blocked(user_id):
+        await call.message.edit_text("<b>🚫 Вы заблокированы</b> и не можете использовать бота!")
+        await call.answer()
+        return
+    if not is_admin(user_id):
         await call.answer("❌ У вас нет прав!", show_alert=True)
         return
     admins = get_admins()
@@ -543,6 +657,12 @@ async def back_to_menu(call: types.CallbackQuery):
     await call.message.edit_text(text, reply_markup=get_main_menu(is_admin(user_id)), disable_web_page_preview=True)
     await call.answer()
 
+def get_cancel_button():
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="cancel_input")
+    return builder.as_markup()
+
+
 @dp.message(Command("add_admin"))
 async def add_admin_command(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -551,7 +671,7 @@ async def add_admin_command(message: types.Message, state: FSMContext):
         return
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Введите Telegram ID нового администратора (число):")
+        await message.answer("Введите Telegram ID нового администратора (число):", reply_markup=get_cancel_button())
         await state.set_state(UserState.waiting_for_admin_id)
     else:
         try:
@@ -559,6 +679,16 @@ async def add_admin_command(message: types.Message, state: FSMContext):
             await process_add_admin_direct(message, new_admin_id)
         except ValueError:
             await message.answer("<b>Ошибка:</b> ID должен быть числом!")
+
+@dp.callback_query(lambda c: c.data == "cancel_input")
+async def cancel_input(call: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    user_id = call.from_user.id
+    unique_link = get_or_create_user_link(user_id)
+    link = f"https://t.me/{bot_username}?start={unique_link}"
+    text =f"Ваша ссылка: <a href='{link}'>{link}</a>"
+    await call.message.edit_text(text, reply_markup=get_main_menu(is_admin(user_id)), disable_web_page_preview=True)
+    await call.answer()
 
 @dp.message(UserState.waiting_for_admin_id)
 async def process_add_admin(message: types.Message, state: FSMContext):
@@ -571,7 +701,7 @@ async def process_add_admin(message: types.Message, state: FSMContext):
         await process_add_admin_direct(message, new_admin_id)
         await state.clear()
     except ValueError:
-        await message.answer("<b>Ошибка:</b> Введите корректный Telegram ID (число)!")
+        await message.answer("<b>Ошибка:</b> Введите корректный Telegram ID (число)!", reply_markup=get_cancel_button())
 
 async def process_add_admin_direct(message: types.Message, new_admin_id: int):
     if is_admin(new_admin_id):
